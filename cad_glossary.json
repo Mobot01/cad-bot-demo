@@ -1,0 +1,11 @@
+{
+  "sheet name": ["sheet naming", "sheet code", "title block name"],
+  "callout": ["detail bubble", "bubble tag", "view tag"],
+  "section": ["sec cut", "section mark", "slice view"],
+  "viewport": ["vp", "view window", "draw window"],
+  "annotation": ["notes", "text notes", "labels", "dims"],
+  "line weight": ["pen weight", "thickness", "lw"],
+  "dimension style": ["dim style", "dims look", "dimension settings"],
+  "view template": ["vt", "graphics template", "display preset"],
+  "plot": ["print", "pdf export", "publish"]
+}
