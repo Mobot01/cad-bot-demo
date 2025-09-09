@@ -71,10 +71,10 @@ st.title("CAD Standards Bot (Demo)")
 with st.expander("Data status", expanded=True):
     # Show current doc count
     try:
-        cnt = collection.count()
+        cnt = int(collection.count()
     except Exception as e:
-        cnt = 0
         st.error(f"Could not read collection: {e}")
+        cnt = 0
 
     st.write(f"**Documents in index:** {cnt}")
 
