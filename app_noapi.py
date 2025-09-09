@@ -1,4 +1,4 @@
-# app_noapi.py
+# app_noapi.py  —  No-API “concise answer + citations” demo
 
 # ---- 0) Patch sqlite BEFORE importing chromadb (needed on Streamlit Cloud) ----
 import sys
@@ -6,13 +6,15 @@ try:
     import pysqlite3
     sys.modules["sqlite3"] = pysqlite3
 except Exception:
-    # If local env already has a new sqlite3, this is fine
+    # Local env may already have a recent sqlite3
     pass
 
 # ---- 1) Imports ----
 import os
+import re
 import zipfile
 import shutil
+from collections import Counter
 
 import streamlit as st
 import chromadb
@@ -23,7 +25,7 @@ DB_DIR     = "cadstandards_index"                 # folder that holds the Chroma
 ZIP_PATH   = "cadstandards_index.zip"             # prebuilt index shipped with the app
 COLL       = "cad_manual"                         # collection name used during ingest
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-TOP_K      = 5
+TOP_K      = 5                                    # how many chunks to retrieve
 
 # ---- 3) Unzip helper (robust to ZIP layout) ----
 def ensure_index_unzipped() -> bool:
@@ -101,13 +103,38 @@ with st.expander("Data status", expanded=True):
         else:
             st.error("No cadstandards_index folder and no cadstandards_index.zip found.")
 
-# ---- 6) Search box ----
+# ---- 6) Helpers: extractive heuristic ----
+def _sentences(text: str):
+    """Simple sentence splitter suitable for PDF-ish text."""
+    sents = re.split(r'(?<=[\.\?\!])\s+', text.replace('\n', ' ').strip())
+    # keep reasonable lengths to avoid junk
+    return [s.strip() for s in sents if 6 <= len(s) <= 300]
+
+_STOP = {"the","a","an","and","or","of","to","in","on","for","by","is","are","as","at","with","from","that","this","these","those","it","its"}
+
+def _keywords(q: str):
+    toks = re.findall(r"[a-z0-9\-]+", q.lower())
+    return [t for t in toks if t not in _STOP and len(t) > 2]
+
+def _score_sentence(sent: str, keys):
+    if not sent:
+        return 0.0
+    toks = re.findall(r"[a-z0-9\-]+", sent.lower())
+    bag = Counter(toks)
+    # score by keyword frequency with a small length normalization
+    return sum(bag[k] for k in keys) / (1 + len(toks)/40)
+
+def _truncate(s: str, n: int = 300) -> str:
+    s = s.strip().replace("\n", " ")
+    return s if len(s) <= n else s[:n] + "..."
+
+# ---- 7) Search box ----
 query = st.text_input(
     "Ask me something about the CAD standards:",
     placeholder="e.g., line weights for sections"
 )
 
-# ---- 7) Query flow ----
+# ---- 8) Retrieval + extractive concise answer ----
 if query:
     # Always get a (1, dim) numpy array, then take row 0 to ensure a dense vector
     q_mat = embedder.encode(
@@ -132,13 +159,42 @@ if query:
     dists = (res.get("distances") or [[]])[0]
 
     st.subheader("Answer (from CAD Standards):")
+
     if not docs:
         st.write("❌ No relevant answer found in the CAD Standards.")
     else:
-        # Show top snippets with page numbers; keep it short for a demo
+        # ---- Extractive concise answer + citations ----
+        keys = _keywords(query)
+        candidates = []  # (score, sentence, page)
         for text, meta, dist in zip(docs, metas, dists):
             page = meta.get("page", "?")
-            snippet = (text or "").strip().replace("\n", " ")
-            if len(snippet) > 300:
-                snippet = snippet[:300] + "..."
-            st.markdown(f"- **p.{page}** · dist `{dist:.3f}` — {snippet}")
+            for s in _sentences(text or ""):
+                sc = _score_sentence(s, keys)
+                if sc > 0:
+                    candidates.append((sc, s, page))
+
+        candidates.sort(reverse=True, key=lambda x: x[0])
+        top_sents = [s for _, s, _ in candidates[:3]]
+        cited_pages = []
+        for _, _, p in candidates[:3]:
+            if p != "?":
+                try:
+                    cited_pages.append(int(p))
+                except Exception:
+                    pass
+        cited_pages = sorted(set(cited_pages))
+
+        if top_sents:
+            st.markdown("**Concise answer:** " + " ".join(top_sents))
+            if cited_pages:
+                st.caption("**Citations:** CAD Standards manual — " +
+                           ", ".join(f"p.{p}" for p in cited_pages))
+        else:
+            st.write("I couldn’t extract a concise answer. See supporting snippets below.")
+
+        # ---- Supporting snippets (what you had before) ----
+        st.markdown("---")
+        st.markdown("**Supporting snippets:**")
+        for text, meta, dist in zip(docs, metas, dists):
+            page = meta.get("page", "?")
+            st.markdown(f"- **p.{page}** · dist `{dist:.3f}` — {_truncate(text or '')}")
