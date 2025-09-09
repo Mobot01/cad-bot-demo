@@ -106,12 +106,17 @@ query = st.text_input(
 )
 
 if query:
-    # Normalize embedding to match ingest settings
-    q_emb = embedder.encode([query], normalize_embeddings=True)[0].tolist()
+    # Always get a (1, dim) numpy array, then take row 0
+    q_mat = embedder.encode(
+        [query],
+        normalize_embeddings=True,
+        convert_to_numpy=True,   # <<< guarantees ndarray
+    )
+    q_emb = q_mat[0].astype(float).tolist()  # <- 384-length float list
 
     try:
         res = collection.query(
-            query_embeddings=[q_emb],
+            query_embeddings=[q_emb],   # <- correct shape
             n_results=TOP_K,
             include=["documents", "metadatas", "distances"]
         )
