@@ -13,22 +13,42 @@ import chromadb
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 
-DB_DIR = "cadstandards_index"
+DB_DIR   = "cadstandards_index"
 ZIP_PATH = "cadstandards_index.zip"
-COLL = "cad_manual"
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"   # exact repo name is safest
-TOP_K = 5
+COLL     = "cad_manual"
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # safest canonical name
+TOP_K    = 5
 
-# --- unzip index if folder missing ---
+# --- unzip index robustly ---
 def ensure_index_unzipped():
-    if not os.path.isdir(DB_DIR) and os.path.exists(ZIP_PATH):
-        with zipfile.ZipFile(ZIP_PATH, "r") as z:
+    """
+    Ensure we end up with:
+      ./cadstandards_index/
+        chroma.sqlite3
+        <random-id>/
+          *.bin / *.pickle
+    Works whether the zip contains the folder or just the files.
+    """
+    if os.path.isdir(DB_DIR):
+        return False
+
+    if not os.path.exists(ZIP_PATH):
+        return False
+
+    with zipfile.ZipFile(ZIP_PATH, "r") as z:
+        names = z.namelist()
+        if all(n.startswith(DB_DIR + "/") or n.endswith("/") for n in names):
+            # ZIP already contains 'cadstandards_index/...'
             z.extractall(".")
-        return True
-    return False
+        else:
+            # ZIP has files at top-level; place them inside 'cadstandards_index/'
+            os.makedirs(DB_DIR, exist_ok=True)
+            z.extractall(DB_DIR)
+    return True
 
 unzipped_now = ensure_index_unzipped()
 
+# --- model & collection ---
 embedder = SentenceTransformer(MODEL_NAME)
 
 def open_collection():
@@ -40,12 +60,12 @@ def open_collection():
 
 collection = open_collection()
 
-# --- Streamlit UI ---
+# --- UI ---
 st.set_page_config(page_title="CAD Standards Bot (Demo)", layout="centered")
 st.title("CAD Standards Bot (Demo)")
 
-# Health check / helpful debug for demo
-with st.expander("Data status", expanded=False):
+# Health/debug panel
+with st.expander("Data status", expanded=True):
     try:
         cnt = collection.count()
     except Exception as e:
@@ -65,9 +85,8 @@ with st.expander("Data status", expanded=False):
 query = st.text_input("Ask me something about the CAD standards:", placeholder="e.g., line weights for sections")
 
 if query:
-    # IMPORTANT: normalize embeddings to match how ingest.py built them
+    # Normalize embeddings to match ingest.py
     q_emb = embedder.encode([query], normalize_embeddings=True)[0].tolist()
-
     try:
         res = collection.query(
             query_embeddings=[q_emb],
@@ -86,7 +105,6 @@ if query:
     if not docs:
         st.write("❌ No relevant answer found in the CAD Standards.")
     else:
-        # show top snippets with page citations
         for t, m, d in zip(docs, metas, dists):
             page = m.get("page", "?")
             snippet = (t or "").strip().replace("\n", " ")
