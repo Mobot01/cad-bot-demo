@@ -75,10 +75,21 @@ with st.expander("Data status", expanded=True):
     if cnt == 0:
         if os.path.exists(ZIP_PATH):
             st.warning("Index appears empty. Trying to re-extract ZIP and reload…")
-            if st.button("Re-extract and Reload"):
-                ensure_index_unzipped()
-                collection = open_collection()
-                st.experimental_rerun()
+  if st.button("Re-extract and Reload"):
+    import shutil
+    # in case a bad/empty folder exists, remove and re-extract cleanly
+    if os.path.isdir(DB_DIR):
+        shutil.rmtree(DB_DIR, ignore_errors=True)
+
+    ensure_index_unzipped()
+    collection = open_collection()
+
+    # Streamlit 1.25+ uses st.rerun(); older builds still have experimental_rerun
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
         else:
             st.error("No cadstandards_index folder and no cadstandards_index.zip found.")
 
