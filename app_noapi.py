@@ -1,6 +1,6 @@
 # app_noapi.py
 
-# ---- patch sqlite before importing chromadb ----
+# ---- patch sqlite before importing chromadb (needed on Streamlit Cloud) ----
 import sys
 try:
     import pysqlite3
@@ -8,18 +8,22 @@ try:
 except Exception:
     pass
 
-import os, json, zipfile
+import os
+import json
+import zipfile
+import shutil
+
 import chromadb
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 
-DB_DIR   = "cadstandards_index"
-ZIP_PATH = "cadstandards_index.zip"
-COLL     = "cad_manual"
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # safest canonical name
-TOP_K    = 5
+DB_DIR     = "cadstandards_index"
+ZIP_PATH   = "cadstandards_index.zip"
+COLL       = "cad_manual"
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+TOP_K      = 5
 
-# --- unzip index robustly ---
+# --- unzip index robustly (handles both zip layouts) ---
 def ensure_index_unzipped():
     """
     Ensure we end up with:
@@ -31,22 +35,22 @@ def ensure_index_unzipped():
     """
     if os.path.isdir(DB_DIR):
         return False
-
     if not os.path.exists(ZIP_PATH):
         return False
 
     with zipfile.ZipFile(ZIP_PATH, "r") as z:
         names = z.namelist()
+        # Case A: zip already has 'cadstandards_index/...'
         if all(n.startswith(DB_DIR + "/") or n.endswith("/") for n in names):
-            # ZIP already contains 'cadstandards_index/...'
             z.extractall(".")
         else:
-            # ZIP has files at top-level; place them inside 'cadstandards_index/'
+            # Case B: zip has index files at top level; put them under DB_DIR
             os.makedirs(DB_DIR, exist_ok=True)
             z.extractall(DB_DIR)
     return True
 
-unzipped_now = ensure_index_unzipped()
+# Try to ensure the index is present on startup
+_ = ensure_index_unzipped()
 
 # --- model & collection ---
 embedder = SentenceTransformer(MODEL_NAME)
@@ -55,7 +59,7 @@ def open_collection():
     client = chromadb.PersistentClient(path=DB_DIR)
     return client.get_or_create_collection(
         name=COLL,
-        metadata={"hnsw:space": "cosine"}
+        metadata={"hnsw:space": "cosine"}  # cosine similarity
     )
 
 collection = open_collection()
@@ -64,40 +68,47 @@ collection = open_collection()
 st.set_page_config(page_title="CAD Standards Bot (Demo)", layout="centered")
 st.title("CAD Standards Bot (Demo)")
 
-# Health/debug panel
 with st.expander("Data status", expanded=True):
+    # Show current doc count
     try:
         cnt = collection.count()
     except Exception as e:
         cnt = 0
         st.error(f"Could not read collection: {e}")
+
     st.write(f"**Documents in index:** {cnt}")
+
     if cnt == 0:
         if os.path.exists(ZIP_PATH):
             st.warning("Index appears empty. Trying to re-extract ZIP and reload…")
-  if st.button("Re-extract and Reload"):
-    import shutil
-    # in case a bad/empty folder exists, remove and re-extract cleanly
-    if os.path.isdir(DB_DIR):
-        shutil.rmtree(DB_DIR, ignore_errors=True)
+            if st.button("Re-extract and Reload"):
+                # ---- DROP-IN FIX START ----
+                # Remove any half-baked or empty index folder so we re-extract cleanly
+                if os.path.isdir(DB_DIR):
+                    shutil.rmtree(DB_DIR, ignore_errors=True)
 
-    ensure_index_unzipped()
-    collection = open_collection()
+                # Unzip and reopen the collection
+                ensure_index_unzipped()
+                collection = open_collection()
 
-    # Streamlit 1.25+ uses st.rerun(); older builds still have experimental_rerun
-    if hasattr(st, "rerun"):
-        st.rerun()
-    else:
-        st.experimental_rerun()
-
+                # Streamlit 1.25+ uses st.rerun(); older builds still have experimental_rerun
+                if hasattr(st, "rerun"):
+                    st.rerun()
+                else:
+                    st.experimental_rerun()
+                # ---- DROP-IN FIX END ----
         else:
             st.error("No cadstandards_index folder and no cadstandards_index.zip found.")
 
-query = st.text_input("Ask me something about the CAD standards:", placeholder="e.g., line weights for sections")
+query = st.text_input(
+    "Ask me something about the CAD standards:",
+    placeholder="e.g., line weights for sections"
+)
 
 if query:
-    # Normalize embeddings to match ingest.py
+    # Normalize embedding to match ingest settings
     q_emb = embedder.encode([query], normalize_embeddings=True)[0].tolist()
+
     try:
         res = collection.query(
             query_embeddings=[q_emb],
