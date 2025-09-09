@@ -1,37 +1,40 @@
 # app_noapi.py
 
-# ---- patch sqlite before importing chromadb (needed on Streamlit Cloud) ----
+# ---- 0) Patch sqlite BEFORE importing chromadb (needed on Streamlit Cloud) ----
 import sys
 try:
     import pysqlite3
     sys.modules["sqlite3"] = pysqlite3
 except Exception:
+    # If local env already has a new sqlite3, this is fine
     pass
 
+# ---- 1) Imports ----
 import os
-import json
 import zipfile
 import shutil
 
-import chromadb
 import streamlit as st
+import chromadb
 from sentence_transformers import SentenceTransformer
 
-DB_DIR     = "cadstandards_index"
-ZIP_PATH   = "cadstandards_index.zip"
-COLL       = "cad_manual"
+# ---- 2) Config ----
+DB_DIR     = "cadstandards_index"                 # folder that holds the Chroma DB
+ZIP_PATH   = "cadstandards_index.zip"             # prebuilt index shipped with the app
+COLL       = "cad_manual"                         # collection name used during ingest
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 TOP_K      = 5
 
-# --- unzip index robustly (handles both zip layouts) ---
-def ensure_index_unzipped():
+# ---- 3) Unzip helper (robust to ZIP layout) ----
+def ensure_index_unzipped() -> bool:
     """
     Ensure we end up with:
-      ./cadstandards_index/
-        chroma.sqlite3
-        <random-id>/
-          *.bin / *.pickle
+        ./cadstandards_index/
+            chroma.sqlite3
+            <uuid>/
+                *.bin, *.pickle ...
     Works whether the zip contains the folder or just the files.
+    Returns True if we extracted anything this call, else False.
     """
     if os.path.isdir(DB_DIR):
         return False
@@ -44,7 +47,7 @@ def ensure_index_unzipped():
         if all(n.startswith(DB_DIR + "/") or n.endswith("/") for n in names):
             z.extractall(".")
         else:
-            # Case B: zip has index files at top level; put them under DB_DIR
+            # Case B: zip has index files at top-level; place them under DB_DIR
             os.makedirs(DB_DIR, exist_ok=True)
             z.extractall(DB_DIR)
     return True
@@ -52,26 +55,27 @@ def ensure_index_unzipped():
 # Try to ensure the index is present on startup
 _ = ensure_index_unzipped()
 
-# --- model & collection ---
+# ---- 4) Model & collection ----
 embedder = SentenceTransformer(MODEL_NAME)
 
 def open_collection():
     client = chromadb.PersistentClient(path=DB_DIR)
     return client.get_or_create_collection(
         name=COLL,
-        metadata={"hnsw:space": "cosine"}  # cosine similarity
+        metadata={"hnsw:space": "cosine"},  # cosine similarity
     )
 
 collection = open_collection()
 
-# --- UI ---
+# ---- 5) UI ----
 st.set_page_config(page_title="CAD Standards Bot (Demo)", layout="centered")
 st.title("CAD Standards Bot (Demo)")
 
+# Debug/health panel
 with st.expander("Data status", expanded=True):
-    # Show current doc count
+    # Show current doc count (defensive: always produce a value)
     try:
-        cnt = int(collection.count()
+        cnt = int(collection.count())
     except Exception as e:
         st.error(f"Could not read collection: {e}")
         cnt = 0
@@ -80,45 +84,44 @@ with st.expander("Data status", expanded=True):
 
     if cnt == 0:
         if os.path.exists(ZIP_PATH):
-            st.warning("Index appears empty. Trying to re-extract ZIP and reload…")
+            st.warning("Index appears empty. Try re-extracting the ZIP and reloading.")
             if st.button("Re-extract and Reload"):
-                # ---- DROP-IN FIX START ----
-                # Remove any half-baked or empty index folder so we re-extract cleanly
+                # Remove any half-baked folder first
                 if os.path.isdir(DB_DIR):
                     shutil.rmtree(DB_DIR, ignore_errors=True)
 
-                # Unzip and reopen the collection
                 ensure_index_unzipped()
-                collection = open_collection()
 
-                # Streamlit 1.25+ uses st.rerun(); older builds still have experimental_rerun
+                # Reopen collection, then rerun app to refresh state
+                collection = open_collection()  # local shadow is fine before rerun
                 if hasattr(st, "rerun"):
                     st.rerun()
                 else:
                     st.experimental_rerun()
-                # ---- DROP-IN FIX END ----
         else:
             st.error("No cadstandards_index folder and no cadstandards_index.zip found.")
 
+# ---- 6) Search box ----
 query = st.text_input(
     "Ask me something about the CAD standards:",
     placeholder="e.g., line weights for sections"
 )
 
+# ---- 7) Query flow ----
 if query:
-    # Always get a (1, dim) numpy array, then take row 0
+    # Always get a (1, dim) numpy array, then take row 0 to ensure a dense vector
     q_mat = embedder.encode(
         [query],
         normalize_embeddings=True,
-        convert_to_numpy=True,   # <<< guarantees ndarray
+        convert_to_numpy=True,
     )
-    q_emb = q_mat[0].astype(float).tolist()  # <- 384-length float list
+    q_emb = q_mat[0].astype(float).tolist()  # 384-length vector for MiniLM
 
     try:
         res = collection.query(
-            query_embeddings=[q_emb],   # <- correct shape
+            query_embeddings=[q_emb],
             n_results=TOP_K,
-            include=["documents", "metadatas", "distances"]
+            include=["documents", "metadatas", "distances"],
         )
     except Exception as e:
         st.error(f"Query failed: {e}")
@@ -132,9 +135,10 @@ if query:
     if not docs:
         st.write("❌ No relevant answer found in the CAD Standards.")
     else:
-        for t, m, d in zip(docs, metas, dists):
-            page = m.get("page", "?")
-            snippet = (t or "").strip().replace("\n", " ")
+        # Show top snippets with page numbers; keep it short for a demo
+        for text, meta, dist in zip(docs, metas, dists):
+            page = meta.get("page", "?")
+            snippet = (text or "").strip().replace("\n", " ")
             if len(snippet) > 300:
                 snippet = snippet[:300] + "..."
-            st.markdown(f"- **p.{page}** · dist `{d:.3f}` — {snippet}")
+            st.markdown(f"- **p.{page}** · dist `{dist:.3f}` — {snippet}")
